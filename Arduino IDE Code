@@ -1,0 +1,282 @@
+// ============================================================
+//  InfantGuard - Final Presentation Code FIXED
+//  MAX30102 reading directly controls LCD and LEDs
+//  WHO iCCM Thresholds (1-5 years):
+//  GREEN  = SpO2 >= 95% NORMAL
+//  YELLOW = SpO2 92-94% MONITOR
+//  RED    = SpO2 < 92%  REFER NOW
+// ============================================================
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "MAX30105.h"
+#include "spo2_algorithm.h"
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+MAX30105 particleSensor;
+
+#define GREEN_LED   6
+#define YELLOW_LED  7
+#define RED_LED     8
+#define BUTTON_PIN  2
+
+#define SPO2_NORMAL  95
+#define SPO2_MONITOR 92
+
+#define BUFFER_LENGTH 50
+uint16_t irBuffer[BUFFER_LENGTH];
+uint16_t redBuffer[BUFFER_LENGTH];
+
+int32_t spo2;
+int8_t  validSPO2;
+int32_t heartRate;
+int8_t  validHeartRate;
+
+// ============================================================
+void allLEDsOff() {
+  digitalWrite(GREEN_LED,  LOW);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED,    LOW);
+}
+
+// ============================================================
+void showLEDDemo() {
+  allLEDsOff();
+  digitalWrite(GREEN_LED, HIGH);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("GREEN = NORMAL "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("SpO2 >= 95%    "));
+  delay(2000);
+
+  allLEDsOff();
+  digitalWrite(YELLOW_LED, HIGH);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("YELLOW= MONITOR"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("SpO2 92%-94%   "));
+  delay(2000);
+
+  allLEDsOff();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("RED = REFER NOW"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("SpO2 < 92%     "));
+  for (byte i = 0; i < 5; i++) {
+    digitalWrite(RED_LED, HIGH);
+    delay(250);
+    digitalWrite(RED_LED, LOW);
+    delay(250);
+  }
+  digitalWrite(RED_LED, HIGH);
+  delay(1000);
+  allLEDsOff();
+}
+
+// ============================================================
+void waitScreen() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("  InfantGuard  "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Press Btn=Scan "));
+}
+
+// ============================================================
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(GREEN_LED,  OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED,    OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  allLEDsOff();
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print(F("  InfantGuard  "));
+  lcd.setCursor(0, 1);
+  lcd.print(F(" Pneumonia Aid "));
+  delay(2000);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F(" WHO Standards "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("  Ages 1-5yrs  "));
+  delay(2000);
+
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Sensor Error!  "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Check wiring!  "));
+    while (true);
+  }
+
+  // Sensor setup — increased sensitivity
+  particleSensor.setup(
+    60,   // LED brightness
+    4,    // sample average
+    2,    // LED mode
+    400,  // sample rate — increased
+    411,  // pulse width
+    4096  // ADC range
+  );
+
+  // Increase LED power for better reading
+  particleSensor.setPulseAmplitudeRed(0x1F);
+  particleSensor.setPulseAmplitudeIR(0x1F);
+
+  showLEDDemo();
+  waitScreen();
+}
+
+// ============================================================
+void loop() {
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    delay(50);
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      doReading();
+      delay(5000);
+      allLEDsOff();
+      waitScreen();
+    }
+  }
+}
+
+// ============================================================
+void doReading() {
+  allLEDsOff();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Place finger   "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Press FIRMLY   "));
+  delay(3000);
+
+  // Collect samples
+  for (byte i = 0; i < BUFFER_LENGTH; i++) {
+    while (!particleSensor.available())
+      particleSensor.check();
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i]  = particleSensor.getIR();
+    particleSensor.nextSample();
+
+    // Show IR value on serial for debugging
+    Serial.print(F("IR="));
+    Serial.println(irBuffer[i]);
+
+    if (i == 12) {
+      lcd.setCursor(0, 1);
+      lcd.print(F("Scanning 25%   "));
+    }
+    if (i == 25) {
+      lcd.setCursor(0, 1);
+      lcd.print(F("Scanning 50%   "));
+    }
+    if (i == 37) {
+      lcd.setCursor(0, 1);
+      lcd.print(F("Scanning 75%   "));
+    }
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("Scanning 100%  "));
+  delay(500);
+
+  // Calculate SpO2
+  maxim_heart_rate_and_oxygen_saturation(
+    irBuffer, BUFFER_LENGTH, redBuffer,
+    &spo2, &validSPO2,
+    &heartRate, &validHeartRate
+  );
+
+  // Print raw values to serial
+  Serial.print(F("SpO2="));
+  Serial.print(spo2);
+  Serial.print(F(" valid="));
+  Serial.print(validSPO2);
+  Serial.print(F(" HR="));
+  Serial.print(heartRate);
+  Serial.print(F(" validHR="));
+  Serial.println(validHeartRate);
+
+  // Get last IR value
+  uint16_t irValue = irBuffer[BUFFER_LENGTH - 1];
+  Serial.print(F("Last IR="));
+  Serial.println(irValue);
+
+  // ============================================================
+  // FINGER CHECK — lowered threshold to 1000
+  // ============================================================
+  if (irValue < 1000) {
+    allLEDsOff();
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("No finger!     "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Press to retry "));
+    return;
+  }
+
+  // ============================================================
+  // DISPLAY RAW READING REGARDLESS
+  // Even if not fully valid — show what sensor reads
+  // ============================================================
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("O2:"));
+  lcd.print(spo2 > 0 ? spo2 : 0);
+  lcd.print(F("% HR:"));
+  lcd.print((validHeartRate && heartRate > 0) ? heartRate : 0);
+
+  // ============================================================
+  // WHO DECISION — directly from SpO2 value
+  // SpO2 controls BOTH LCD line 2 AND LED
+  // They always match — same variable controls both!
+  // ============================================================
+  allLEDsOff();
+
+  if (validSPO2 && spo2 >= SPO2_NORMAL) {
+    // SpO2 >= 95% — NORMAL
+    digitalWrite(GREEN_LED, HIGH);
+    lcd.setCursor(0, 1);
+    lcd.print(F("NORMAL  >=95%  "));
+    Serial.println(F("RESULT: NORMAL"));
+
+  } else if (validSPO2 && spo2 >= SPO2_MONITOR) {
+    // SpO2 92-94% — MONITOR
+    digitalWrite(YELLOW_LED, HIGH);
+    lcd.setCursor(0, 1);
+    lcd.print(F("MONITOR 92-94% "));
+    Serial.println(F("RESULT: MONITOR"));
+
+  } else if (validSPO2 && spo2 < SPO2_MONITOR) {
+    // SpO2 < 92% — REFER NOW
+    lcd.setCursor(0, 1);
+    lcd.print(F("REFER NOW! <92%"));
+    for (byte i = 0; i < 8; i++) {
+      digitalWrite(RED_LED, HIGH);
+      delay(250);
+      digitalWrite(RED_LED, LOW);
+      delay(250);
+    }
+    digitalWrite(RED_LED, HIGH);
+    Serial.println(F("RESULT: REFER NOW"));
+
+  } else {
+    // Reading not valid yet — show yellow and ask to retry
+    digitalWrite(YELLOW_LED, HIGH);
+    lcd.setCursor(0, 1);
+    lcd.print(F("Hold still...  "));
+    Serial.println(F("RESULT: INVALID - retry"));
+  }
+}
